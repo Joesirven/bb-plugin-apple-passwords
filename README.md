@@ -76,6 +76,11 @@ fallback). The log is `~/Library/Logs/bb-apple-passwords.log`.
   frames.
 - The token is in the bb app local storage. Other bb plugins in the same app
   can read it. Touch ID for each password limits what a stolen token can do.
+- Apple's extension keeps the pairing key in memory only. If the companion,
+  its Chrome, or the Mac restarts, pair again on the setup page.
+- The companion must run on the Mac where you use the bb desktop app, and it
+  must allow the bb address that this Mac uses. `node companion/cli.ts status`
+  shows the allowed addresses.
 - If Apple changes the internal functions of its extension, the bridge in
   `companion/bridge.ts` must change too.
 

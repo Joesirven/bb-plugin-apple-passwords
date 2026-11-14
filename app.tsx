@@ -278,10 +278,15 @@ function SetupPage() {
         ) : (
           <>
             <p className="text-sm text-muted-foreground">
-              {offline ? "The companion is not running. " : ""}Run this in Terminal. It needs Node 24, Google Chrome and
-              the iCloud Passwords extension from the Chrome Web Store.
+              {offline
+                ? "bb cannot reach the companion. Either it is not running on this Mac, or it does not allow this bb address. "
+                : ""}
+              Run this in Terminal on this Mac. It needs Node 24, Google Chrome and the iCloud Passwords extension from
+              the Chrome Web Store.
             </p>
-            <code className="block select-all break-all rounded-md bg-muted p-2 text-xs">{INSTALL_COMMAND}</code>
+            <code className="block select-all break-all rounded-md bg-muted p-2 text-xs">
+              {`${INSTALL_COMMAND} --origin ${location.origin}`}
+            </code>
           </>
         )}
       </Step>

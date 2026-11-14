@@ -83,7 +83,7 @@ async function install(args: string[]): Promise<void> {
 `;
   await mkdir(dirname(PLIST_PATH), { recursive: true });
   const domain = `gui/${process.getuid?.() ?? 501}`;
-  await run("launchctl", ["bootout", `${domain}/${LABEL}`]).catch(() => undefined);
+  await stopService(domain);
   await writeFile(PLIST_PATH, plist);
   await run("launchctl", ["bootstrap", domain, PLIST_PATH]);
   process.stdout.write(
@@ -91,9 +91,22 @@ async function install(args: string[]): Promise<void> {
   );
 }
 
+async function stopService(domain: string): Promise<void> {
+  await run("launchctl", ["bootout", `${domain}/${LABEL}`]).catch(() => undefined);
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const loaded = await run("launchctl", ["print", `${domain}/${LABEL}`]).then(
+      () => true,
+      () => false,
+    );
+    if (!loaded) return;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error("The old companion service did not stop. Run the command again.");
+}
+
 async function uninstall(): Promise<void> {
   const domain = `gui/${process.getuid?.() ?? 501}`;
-  await run("launchctl", ["bootout", `${domain}/${LABEL}`]).catch(() => undefined);
+  await stopService(domain);
   await rm(PLIST_PATH, { force: true });
   await rm(APP_DIR, { recursive: true, force: true });
   await rm(join(SUPPORT_DIR, "bin"), { recursive: true, force: true });
@@ -105,6 +118,7 @@ async function uninstall(): Promise<void> {
 
 async function status(): Promise<void> {
   const config = parseConfig(existsSync(CONFIG_PATH) ? JSON.parse(await readFile(CONFIG_PATH, "utf8")) : {});
+  process.stdout.write(`Allowed bb origins: ${config.allowedOrigins.join(", ") || "none"}\n`);
   const response = await fetch(`http://127.0.0.1:${config.port}/v1/status`).catch(() => null);
   if (!response) {
     process.stdout.write("The companion is not running.\n");

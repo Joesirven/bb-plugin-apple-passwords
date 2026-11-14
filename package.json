@@ -40,7 +40,9 @@
     "clsx": "^2.1.1",
     "sonner": "^1.7.4",
     "tailwind-merge": "^3.7.0",
-    "vaul": "^1.1.2"
+    "vaul": "^1.1.2",
+    "@types/better-sqlite3": "^7.6.12",
+    "hono": "^4.11.9"
   },
   "description": "Fill Apple Passwords into the bb browser, with Touch ID for every password.",
   "scripts": {
