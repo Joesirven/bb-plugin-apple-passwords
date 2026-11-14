@@ -1,9 +1,17 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { AppleError, normalizeHostname, type ApplePasswords } from "./apple.ts";
 import type { UserCheck } from "./touchid.ts";
 
-export const COMPANION_VERSION = "0.1.0";
+export const COMPANION_VERSION = "0.2.0";
+export const ICON_NAMES = new Set([
+  "PasswordsToolbar_icon32.png",
+  "PasswordsToolbar-darkmode_icon32.png",
+  "PasswordsToolbarUnpaired_icon32.png",
+  "PasswordsToolbarUnpaired-darkmode_icon32.png",
+]);
 const MAX_BODY_BYTES = 16 * 1024;
 
 export interface TokenStore {
@@ -19,6 +27,7 @@ export interface CompanionDeps {
   userCheck: UserCheck;
   tokens: TokenStore;
   log: (message: string) => void;
+  iconDirectory: string | null;
 }
 
 class HttpError extends Error {
@@ -148,14 +157,28 @@ export function createCompanionServer(deps: CompanionDeps): Server {
         const logins = await (await deps.apple()).logins(host);
         return { hostname: host, logins: logins.map((login) => ({ username: login.username })) };
       }
+      case "/v1/search": {
+        const query = typeof body.query === "string" ? body.query : "";
+        if (query.length > 253) throw new HttpError(400, "bad-request", "The search is too long");
+        const results = await (await deps.apple()).search(query);
+        return { results: results.map((login) => ({ username: login.username, site: login.sites[0] ?? null })) };
+      }
       case "/v1/password": {
-        const host = normalizeHostname(requireString(body, "url"));
+        const pageHost = typeof body.url === "string" ? normalizeHostname(requireString(body, "url")) : null;
+        const savedHost = typeof body.site === "string" ? normalizeHostname(requireString(body, "site")) : pageHost;
+        if (savedHost === null) throw new HttpError(400, "bad-request", "The field url or site is required");
         const username = requireString(body, "username", 512);
-        await requireUser(`fill the password for ${username} on ${host}`);
-        const credential = await (await deps.apple()).password(host, username);
+        const reason =
+          pageHost === null
+            ? `copy the password for ${username} on ${savedHost}`
+            : pageHost === savedHost
+              ? `fill the password for ${username} on ${pageHost}`
+              : `fill the password for ${username}, saved for ${savedHost}, on ${pageHost}`;
+        await requireUser(reason);
+        const credential = await (await deps.apple()).password(savedHost, username);
         if (!credential) throw new HttpError(404, "no-password", "Apple Passwords has no password for this login");
-        deps.log(`Released a password for ${host}`);
-        return { hostname: host, username: credential.username, password: credential.password };
+        deps.log(`Released a password for ${savedHost}`);
+        return { hostname: savedHost, username: credential.username, password: credential.password };
       }
       default:
         throw new HttpError(404, "not-found", "Not found");
@@ -188,6 +211,20 @@ export function createCompanionServer(deps: CompanionDeps): Server {
       return;
     }
     const path = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+    if (method === "GET" && path.startsWith("/v1/icon/")) {
+      const name = path.slice("/v1/icon/".length);
+      if (!ICON_NAMES.has(name) || deps.iconDirectory === null) return send(404, { error: "Not found", code: "not-found" });
+      readFile(join(deps.iconDirectory, "images", name)).then(
+        (image) => {
+          response.statusCode = 200;
+          response.setHeader("Content-Type", "image/png");
+          response.setHeader("Cache-Control", "max-age=3600");
+          response.end(image);
+        },
+        () => send(404, { error: "Not found", code: "not-found" }),
+      );
+      return;
+    }
     route(request, method, path).then(
       (payload) => send(200, payload),
       (error: unknown) => {

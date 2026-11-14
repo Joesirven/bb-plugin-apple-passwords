@@ -10,6 +10,11 @@ export interface CompanionStatus {
   detail: string | null;
 }
 
+export interface SearchResult {
+  username: string;
+  site: string | null;
+}
+
 export class CompanionError extends Error {
   readonly code: string;
   constructor(code: string, message: string) {
@@ -106,11 +111,25 @@ export const companion = {
         .filter((username): username is string => typeof username === "string"),
     };
   },
-  async password(url: string, username: string): Promise<{ username: string; password: string }> {
-    const payload = await request("/v1/password", { url, username });
+  async search(query: string): Promise<SearchResult[]> {
+    const payload = await request("/v1/search", { query });
+    const results = Array.isArray(payload.results) ? payload.results : [];
+    return results.flatMap((value: unknown) => {
+      const item = value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
+      if (typeof item.username !== "string") return [];
+      return [{ username: item.username, site: typeof item.site === "string" ? item.site : null }];
+    });
+  },
+  async password(input: { url?: string; site?: string; username: string }): Promise<{ username: string; password: string }> {
+    const payload = await request("/v1/password", input);
     if (typeof payload.password !== "string" || typeof payload.username !== "string") {
       throw new CompanionError("error", "The companion returned no password");
     }
     return { username: payload.username, password: payload.password };
+  },
+  async icon(name: string): Promise<Blob> {
+    const response = await fetch(`${COMPANION_URL}/v1/icon/${name}`, { credentials: "omit" });
+    if (!response.ok) throw new CompanionError("no-icon", "The companion has no icon");
+    return response.blob();
   },
 };

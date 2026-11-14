@@ -9,11 +9,15 @@ import type { Readable, Writable } from "node:stream";
 import { after, before, beforeEach, describe, it } from "node:test";
 import { CdpPipe } from "../companion/cdp.ts";
 import {
+  buildArmExpression,
   buildCloseExpression,
+  buildResultsExpression,
   buildFillExpression,
   buildInspectExpression,
   buildPickerExpression,
+  isSameSite,
   parsePageMessage,
+  type PickerLogin,
 } from "./page-script.ts";
 
 const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -84,16 +88,43 @@ async function waitFor<T>(read: () => Promise<T>, accept: (value: T) => boolean)
   return read();
 }
 
-async function showPicker(nonce: string) {
+async function showPicker(
+  nonce: string,
+  logins: PickerLogin[] = [
+    { username: "ana@example.com", site: null },
+    { username: "bo", site: null },
+  ],
+) {
   return isolated(
     buildPickerExpression({
       nonce,
       hostname: "127.0.0.1",
-      logins: [{ username: "ana@example.com" }, { username: "bo" }],
+      logins,
       theme: { dark: false },
       message: null,
+      action: null,
+      searchable: true,
+      focus: true,
     }),
   );
+}
+
+async function clickElement(selector: string) {
+  const rect = (await main(`(() => {
+    const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  })()`)) as { x: number; y: number };
+  for (const type of ["mousePressed", "mouseReleased"]) {
+    await send("Input.dispatchMouseEvent", { type, x: rect.x, y: rect.y, button: "left", clickCount: 1 });
+  }
+}
+
+async function settle() {
+  await new Promise((resolve) => setTimeout(resolve, 150));
+}
+
+async function parsedMessages() {
+  return (await messages()).map(parsePageMessage);
 }
 
 describe("page script in headless Chrome", { skip: !existsSync(CHROME) && "Google Chrome is not installed" }, () => {
@@ -162,7 +193,7 @@ describe("page script in headless Chrome", { skip: !existsSync(CHROME) && "Googl
     await pressKey("Enter", "Enter", 13);
     const received = await waitFor(messages, (list) => list.length > 0);
     assert.deepEqual(received.map(parsePageMessage), [
-      { type: "apple-passwords-pick", nonce: "n2", username: "ana@example.com" },
+      { type: "apple-passwords-pick", nonce: "n2", username: "ana@example.com", site: null, confirmed: false },
     ]);
   });
 
@@ -218,5 +249,96 @@ describe("page script in headless Chrome", { skip: !existsSync(CHROME) && "Googl
     const result = await isolated(buildFillExpression({ origin, nonce: "n7", username: "ana", password: "fake" }));
     assert.deepEqual(result, { filled: false, reason: "The picker was closed" });
     assert.equal(await main("document.getElementById('password').value"), "");
+  });
+
+  it("offers logins when a login field gets focus, once per arm", async () => {
+    assert.deepEqual(await isolated(buildArmExpression({ nonce: "arm1", reset: true })), { installed: true });
+    assert.deepEqual(await isolated(buildArmExpression({ nonce: "arm1", reset: false })), { installed: false });
+    await clickElement("#password");
+    const received = await waitFor(parsedMessages, (list) => list.length > 0);
+    await settle();
+    assert.deepEqual(await parsedMessages(), [{ type: "apple-passwords-field", nonce: "arm1" }]);
+    assert.ok(received.length > 0);
+  });
+
+  it("ignores focus on fields that are not login fields and synthetic focus from the page", async () => {
+    await isolated(buildArmExpression({ nonce: "arm2", reset: true }));
+    await clickElement("#search");
+    await main("document.getElementById('password').dispatchEvent(new FocusEvent('focusin', { bubbles: true }))");
+    await settle();
+    assert.deepEqual(await messages(), []);
+  });
+
+  it("stays quiet on focus after a dismissal, but a click opens it again", async () => {
+    await isolated(buildArmExpression({ nonce: "arm3", reset: true }));
+    await showPicker("p3");
+    await pressKey("Escape", "Escape", 27);
+    await waitFor(messages, (list) => list.length > 0);
+    await isolated("(globalThis.__messages = [], null)");
+    await main("document.getElementById('email').focus()");
+    await pressKey("Tab", "Tab", 9);
+    await settle();
+    assert.deepEqual(await messages(), []);
+    await clickElement("#email");
+    await waitFor(messages, (list) => list.length > 0);
+    assert.deepEqual(await parsedMessages(), [{ type: "apple-passwords-field", nonce: "arm3" }]);
+  });
+
+  it("does not offer again when the fill moves focus between the fields", async () => {
+    await isolated(buildArmExpression({ nonce: "arm4", reset: true }));
+    await showPicker("p4");
+    const result = await isolated(buildFillExpression({ origin, nonce: "p4", username: "ana", password: "fake" }));
+    assert.deepEqual(result, { filled: true, reason: null });
+    await settle();
+    assert.deepEqual(await messages(), []);
+  });
+
+  it("asks before it fills a login that is saved for another site", async () => {
+    await showPicker("p5", [{ username: "ana", site: "other.example" }]);
+    await pressKey("Enter", "Enter", 13);
+    await settle();
+    assert.deepEqual(await messages(), []);
+    await pressKey("Enter", "Enter", 13);
+    await waitFor(messages, (list) => list.length > 0);
+    assert.deepEqual(await parsedMessages(), [
+      { type: "apple-passwords-pick", nonce: "p5", username: "ana", site: "other.example", confirmed: true },
+    ]);
+  });
+
+  it("fills a login for this site without asking", async () => {
+    await showPicker("p6", [{ username: "ana", site: "127.0.0.1" }]);
+    await pressKey("Enter", "Enter", 13);
+    await waitFor(messages, (list) => list.length > 0);
+    assert.deepEqual(await parsedMessages(), [
+      { type: "apple-passwords-pick", nonce: "p6", username: "ana", site: "127.0.0.1", confirmed: false },
+    ]);
+  });
+
+  it("sends typed searches and shows the results it gets back", async () => {
+    await showPicker("p7", []);
+    await send("Input.insertText", { text: "git" });
+    await waitFor(messages, (list) => list.length > 0);
+    assert.deepEqual(await parsedMessages(), [{ type: "apple-passwords-search", nonce: "p7", query: "git" }]);
+    assert.equal(
+      await isolated(buildResultsExpression("p7", [{ username: "octo", site: "github.com" }], null)),
+      true,
+    );
+    assert.equal(await isolated(buildResultsExpression("other", [], null)), false);
+    await isolated("(globalThis.__messages = [], null)");
+    await pressKey("Tab", "Tab", 9);
+    await pressKey("Enter", "Enter", 13);
+    await settle();
+    assert.deepEqual(await messages(), []);
+    await pressKey("Enter", "Enter", 13);
+    await waitFor(messages, (list) => list.length > 0);
+    assert.deepEqual(await parsedMessages(), [
+      { type: "apple-passwords-pick", nonce: "p7", username: "octo", site: "github.com", confirmed: true },
+    ]);
+  });
+
+  it("matches a site to its subdomains only", () => {
+    assert.equal(isSameSite("example.com", "accounts.example.com"), true);
+    assert.equal(isSameSite("accounts.example.com", "example.com"), true);
+    assert.equal(isSameSite("example.com", "badexample.com"), false);
   });
 });

@@ -9,16 +9,20 @@ import {
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
-import { companion, CompanionError, type CompanionStatus } from "@/lib/companion";
+import { companion, CompanionError, type CompanionStatus, type SearchResult } from "@/lib/companion";
 import {
   buildCloseExpression,
   buildFillExpression,
   buildInspectExpression,
+  buildArmExpression,
   buildPickerExpression,
+  buildResultsExpression,
   buildStatusExpression,
+  isSameSite,
   parsePageMessage,
   type FillResult,
   type PageInfo,
+  type PickerLogin,
 } from "@/lib/page-script";
 import { cn } from "@/lib/utils";
 
@@ -60,26 +64,190 @@ interface PickerSession {
   nonce: string;
   origin: string;
   hostname: string;
+  logins: PickerLogin[];
 }
 
-function useFillFlow(page: ExperimentalPluginBrowserPage | null) {
+type OpenMode = "explicit" | "field";
+
+const NEEDS_CONNECT = new Set(["not-connected"]);
+const ICON_CACHE = new Map<string, Promise<string>>();
+
+function appleIconUrl(paired: boolean, dark: boolean): Promise<string> {
+  const name = `PasswordsToolbar${paired ? "" : "Unpaired"}${dark ? "-darkmode" : ""}_icon32.png`;
+  let cached = ICON_CACHE.get(name);
+  if (!cached) {
+    cached = companion.icon(name).then((blob) => URL.createObjectURL(blob));
+    cached.catch(() => ICON_CACHE.delete(name));
+    ICON_CACHE.set(name, cached);
+  }
+  return cached;
+}
+
+function useFillFlow(page: ExperimentalPluginBrowserPage | null, url: string) {
+  const navigate = useBbNavigate();
+  const armNonce = useRef(newNonce());
   const session = useRef<PickerSession | null>(null);
+  const opening = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [paired, setPaired] = useState(false);
+
+  const refreshPairing = useCallback(() => {
+    if (!companion.hasToken()) {
+      setPaired(false);
+      return;
+    }
+    companion.status().then(
+      (status) => setPaired(status.connected && status.pairing === "paired"),
+      () => setPaired(false),
+    );
+  }, []);
+
+  const showPicker = useCallback(
+    async (
+      info: PageInfo,
+      options: { logins: PickerLogin[]; message: string | null; action: string | null; searchable: boolean; focus: boolean },
+    ) => {
+      if (page === null) return;
+      const nonce = newNonce();
+      session.current = { nonce, origin: info.origin, hostname: info.hostname, logins: options.logins };
+      await page.evaluate(
+        buildPickerExpression({ nonce, hostname: info.hostname, theme: { dark: isDarkTheme() }, ...options }),
+      );
+    },
+    [page],
+  );
+
+  const startPairing = useCallback(
+    async (info: PageInfo) => {
+      const state = await companion.challenge();
+      if (state === "paired") return true;
+      if (state !== "awaiting-code") throw new Error("Apple Passwords did not start pairing. Check that iCloud Keychain is on.");
+      await showPicker(info, {
+        logins: [],
+        message: "macOS shows a six-digit code. Type it in the Apple Passwords panel in bb.",
+        action: null,
+        searchable: false,
+        focus: false,
+      });
+      navigate.toPluginPanel(PANEL_PATH);
+      return false;
+    },
+    [navigate, showPicker],
+  );
+
+  const open = useCallback(
+    async (mode: OpenMode): Promise<void> => {
+      if (page === null || opening.current) return;
+      opening.current = true;
+      setError(null);
+      setBusy(mode === "explicit");
+      try {
+        const info = parsePageInfo(await page.evaluate(buildInspectExpression()));
+        if (!info || !isWebUrl(info.origin)) {
+          if (mode === "explicit") throw new Error("Open a web page with a login form first");
+          return;
+        }
+        if (!companion.hasToken()) {
+          if (mode === "field") {
+            await showPicker(info, {
+              logins: [],
+              message: "Apple Passwords is not connected to bb.",
+              action: "Connect with Touch ID",
+              searchable: false,
+              focus: false,
+            });
+            return;
+          }
+          await companion.connect();
+        }
+        let result: { hostname: string; usernames: string[] };
+        try {
+          result = await companion.logins(info.origin);
+        } catch (cause) {
+          if (!(cause instanceof CompanionError)) throw cause;
+          if (cause.code === "offline") {
+            if (mode === "explicit") navigate.toPluginPanel(PANEL_PATH);
+            return;
+          }
+          if (NEEDS_CONNECT.has(cause.code) || cause.code === "unpaired") {
+            if (mode === "field") {
+              await showPicker(info, {
+                logins: [],
+                message: cause.code === "unpaired" ? "Apple Passwords needs to pair with bb again." : "Apple Passwords is not connected to bb.",
+                action: cause.code === "unpaired" ? "Pair with Apple Passwords" : "Connect with Touch ID",
+                searchable: false,
+                focus: false,
+              });
+              return;
+            }
+            if (NEEDS_CONNECT.has(cause.code)) await companion.connect();
+            else if (!(await startPairing(info))) return;
+            result = await companion.logins(info.origin);
+          } else {
+            throw cause;
+          }
+        }
+        setPaired(true);
+        if (result.usernames.length === 0 && mode === "field") return;
+        await showPicker(info, {
+          logins: result.usernames.map((username) => ({ username, site: null })),
+          message: result.usernames.length === 0 ? `No saved passwords for ${result.hostname}. Search below.` : null,
+          action: null,
+          searchable: true,
+          focus: mode === "explicit",
+        });
+      } catch (cause) {
+        if (mode === "explicit") {
+          setError(cause instanceof CompanionError && cause.code === "user-denied" ? "Touch ID was cancelled" : errorText(cause));
+        }
+      } finally {
+        opening.current = false;
+        setBusy(false);
+        refreshPairing();
+      }
+    },
+    [navigate, page, refreshPairing, showPicker, startPairing],
+  );
 
   useEffect(() => {
     if (page === null) return;
     return page.onMessage((data) => {
       const message = parsePageMessage(data);
+      if (!message) return;
+      if (message.type === "apple-passwords-field") {
+        if (message.nonce === armNonce.current) void open("field");
+        return;
+      }
       const current = session.current;
-      if (!message || !current || message.nonce !== current.nonce) return;
+      if (!current || message.nonce !== current.nonce) return;
       if (message.type === "apple-passwords-dismiss") {
         session.current = null;
         return;
       }
+      if (message.type === "apple-passwords-action") {
+        page.evaluate(buildCloseExpression()).catch(() => undefined);
+        session.current = null;
+        void open("explicit");
+        return;
+      }
+      if (message.type === "apple-passwords-search") {
+        const reply = (logins: PickerLogin[], text: string | null) =>
+          page.evaluate(buildResultsExpression(current.nonce, logins, text)).catch(() => undefined);
+        if (message.query === "") {
+          void reply(current.logins, current.logins.length === 0 ? "Type a site or a user name." : null);
+          return;
+        }
+        companion.search(message.query).then(
+          (results) => reply(results, results.length === 0 ? `Nothing found for “${message.query}”.` : null),
+          (cause: unknown) => reply([], errorText(cause)),
+        );
+        return;
+      }
+      if (message.site !== null && !isSameSite(message.site, current.hostname) && !message.confirmed) return;
       setBusy(true);
       companion
-        .password(current.origin, message.username)
+        .password({ url: current.origin, ...(message.site ? { site: message.site } : {}), username: message.username })
         .then(
           async (credential) => {
             const result = parseFillResult(
@@ -103,7 +271,21 @@ function useFillFlow(page: ExperimentalPluginBrowserPage | null) {
         )
         .finally(() => setBusy(false));
     });
-  }, [page]);
+  }, [open, page]);
+
+  useEffect(() => {
+    if (page === null || !isWebUrl(url)) return;
+    const arm = (reset: boolean) =>
+      page.evaluate(buildArmExpression({ nonce: armNonce.current, reset })).catch(() => undefined);
+    void arm(true);
+    const timer = setInterval(() => void arm(false), 1500);
+    return () => clearInterval(timer);
+  }, [page, url]);
+
+  useEffect(() => {
+    refreshPairing();
+    setError(null);
+  }, [url, refreshPairing]);
 
   useEffect(
     () => () => {
@@ -113,61 +295,28 @@ function useFillFlow(page: ExperimentalPluginBrowserPage | null) {
     [page],
   );
 
-  const open = useCallback(async () => {
-    if (page === null) return;
-    setError(null);
-    setBusy(true);
-    try {
-      const info = parsePageInfo(await page.evaluate(buildInspectExpression()));
-      if (!info || !isWebUrl(info.origin)) throw new Error("Open a web page with a login form first");
-      const { hostname, usernames } = await companion.logins(info.origin);
-      const nonce = newNonce();
-      session.current = { nonce, origin: info.origin, hostname };
-      const message =
-        usernames.length === 0
-          ? `No saved passwords for ${hostname}`
-          : info.hasLoginField
-            ? null
-            : "No login field found. Click a login field first.";
-      await page.evaluate(
-        buildPickerExpression({
-          nonce,
-          hostname,
-          logins: usernames.map((username) => ({ username })),
-          theme: { dark: isDarkTheme() },
-          message,
-        }),
-      );
-    } catch (cause) {
-      session.current = null;
-      setError(errorText(cause));
-      throw cause;
-    } finally {
-      setBusy(false);
-    }
-  }, [page]);
+  return { open, busy, error, paired };
+}
 
-  return { open, busy, error, setError };
+function AppleKeysIcon({ paired, busy }: { paired: boolean; busy: boolean }) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    appleIconUrl(paired, isDarkTheme()).then(
+      (next) => active && setSrc(next),
+      () => active && setSrc(null),
+    );
+    return () => {
+      active = false;
+    };
+  }, [paired]);
+  if (busy) return <Icon name="LoaderCircle" aria-hidden className="animate-spin" />;
+  if (src === null) return <Icon name="KeyRound" aria-hidden />;
+  return <img src={src} alt="" aria-hidden className="size-4" draggable={false} />;
 }
 
 function PasswordsToolbarAction({ url, experimental_page: page }: ExperimentalPluginBrowserToolbarActionProps) {
-  const navigate = useBbNavigate();
-  const { open, busy, error, setError } = useFillFlow(page);
-
-  useEffect(() => setError(null), [url, setError]);
-
-  const onClick = useCallback(() => {
-    if (!companion.hasToken()) {
-      navigate.toPluginPanel(PANEL_PATH);
-      return;
-    }
-    open().catch((cause: unknown) => {
-      if (cause instanceof CompanionError && ["offline", "not-connected", "unpaired"].includes(cause.code)) {
-        navigate.toPluginPanel(PANEL_PATH);
-      }
-    });
-  }, [navigate, open]);
-
+  const { open, busy, error, paired } = useFillFlow(page, url);
   const disabled = page === null || !isWebUrl(url);
   const label =
     page === null ? "Apple Passwords works in the bb desktop app" : (error ?? "Fill a password from Apple Passwords");
@@ -177,14 +326,87 @@ function PasswordsToolbarAction({ url, experimental_page: page }: ExperimentalPl
       aria-label={label}
       title={label}
       disabled={disabled || busy}
-      onClick={onClick}
+      onClick={() => void open("explicit")}
       className={cn(
         "relative flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40",
         error !== null && "text-destructive",
       )}
     >
-      <Icon name={busy ? "LoaderCircle" : "KeyRound"} aria-hidden className={busy ? "animate-spin" : undefined} />
+      <AppleKeysIcon paired={paired} busy={busy} />
+      {error !== null ? <span className="absolute right-1 top-1 size-1.5 rounded-full bg-destructive" aria-hidden /> : null}
     </button>
+  );
+}
+
+function PasswordSearch() {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [note, setNote] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const term = query.trim();
+    if (term === "") {
+      setResults([]);
+      setNote(null);
+      return;
+    }
+    let active = true;
+    const timer = setTimeout(() => {
+      companion.search(term).then(
+        (next) => {
+          if (!active) return;
+          setResults(next);
+          setNote(next.length === 0 ? `Nothing found for “${term}”.` : null);
+        },
+        (cause: unknown) => active && setNote(errorText(cause)),
+      );
+    }, 300);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [query]);
+
+  const copy = (result: SearchResult) => {
+    if (result.site === null) return;
+    setBusy(true);
+    setNote(null);
+    companion
+      .password({ site: result.site, username: result.username })
+      .then(async (credential) => {
+        await navigator.clipboard.writeText(credential.password);
+        setNote(`Copied the password for ${result.username}.`);
+      })
+      .catch((cause: unknown) =>
+        setNote(cause instanceof CompanionError && cause.code === "user-denied" ? "Touch ID was cancelled" : errorText(cause)),
+      )
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <Step done={false} title="Search your passwords">
+      <Input
+        value={query}
+        onChange={(event) => setQuery(event.target.value.slice(0, 253))}
+        placeholder="A site or a user name"
+        aria-label="Search passwords"
+      />
+      {note ? <p className="text-sm text-muted-foreground">{note}</p> : null}
+      <ul className="flex flex-col divide-y divide-border">
+        {results.map((result) => (
+          <li key={`${result.username}@${result.site ?? ""}`} className="flex items-center gap-2 py-2">
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm">{result.username || "(no user name)"}</p>
+              <p className="truncate text-xs text-muted-foreground">{result.site ?? "Unknown site"}</p>
+            </div>
+            <Button size="sm" variant="outline" disabled={busy || result.site === null} onClick={() => copy(result)}>
+              Copy password
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </Step>
   );
 }
 
@@ -315,6 +537,7 @@ function SetupPage() {
               value={pin}
               onChange={(event) => setPin(event.target.value.replace(/\D/g, "").slice(0, 6))}
               inputMode="numeric"
+              autoFocus
               autoComplete="one-time-code"
               placeholder="6-digit code"
               aria-label="Code from macOS"
@@ -347,9 +570,13 @@ function SetupPage() {
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
       {paired && connected ? (
-        <p className="text-sm text-muted-foreground">
-          Ready. Open a login page in the bb browser and click the key button beside the address bar.
-        </p>
+        <>
+          <p className="text-sm text-muted-foreground">
+            Ready. When you click a login field in the bb browser, your saved logins appear below it. The keys button
+            beside the address bar opens them too.
+          </p>
+          <PasswordSearch />
+        </>
       ) : null}
     </div>
   );

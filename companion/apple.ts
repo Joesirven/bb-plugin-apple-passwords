@@ -18,6 +18,7 @@ export interface ApplePasswords {
   verify(pin: string): Promise<PairingState>;
   logins(hostname: string): Promise<LoginSummary[]>;
   password(hostname: string, username: string): Promise<Credential | null>;
+  search(query: string): Promise<LoginSummary[]>;
 }
 
 export type Evaluator = (expression: string, timeoutMs?: number) => Promise<unknown>;
@@ -90,7 +91,37 @@ function translate(error: unknown): never {
   throw new AppleError("apple-error", message);
 }
 
-export function createApplePasswords(evaluateInExtension: Evaluator): ApplePasswords {
+export function searchCandidates(query: string): string[] {
+  const term = query.trim().toLowerCase();
+  if (term.length > 253) throw new AppleError("apple-error", "The search is too long");
+  if (/[\s/:?#@]/.test(term)) {
+    try {
+      return [normalizeHostname(term)];
+    } catch {
+      return [];
+    }
+  }
+  if (term === "") return [""];
+  return term.includes(".") ? [term] : [term, `${term}.com`];
+}
+
+function summarize(entries: Record<string, unknown>[], seen: Set<string>): LoginSummary[] {
+  const logins: LoginSummary[] = [];
+  for (const entry of entries) {
+    if (typeof entry.USR !== "string") continue;
+    const sites = sitesOf(entry);
+    const key = `${entry.USR}\u0000${sites[0] ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    logins.push({ username: entry.USR, sites });
+  }
+  return logins;
+}
+
+export function createApplePasswords(
+  evaluateInExtension: Evaluator,
+  log: (message: string) => void = () => undefined,
+): ApplePasswords {
   let queue: Promise<unknown> = Promise.resolve();
   const serialize = <T>(task: () => Promise<T>): Promise<T> => {
     const next = queue.then(task, task);
@@ -139,6 +170,40 @@ export function createApplePasswords(evaluateInExtension: Evaluator): ApplePassw
         const match = entries.find((entry) => sitesOf(entry).includes(host)) ?? entries[0];
         if (!match) return null;
         return { username, password: match.PWD as string };
+      }),
+    search: (query) =>
+      serialize(async () => {
+        const ghostSearch = async (candidate: string): Promise<Record<string, unknown>[]> => {
+          try {
+            const payload = asRecord(
+              await call("query", [4, "CmdGetLoginNames4URL", candidate, { ACT: 5, URL: candidate }]).catch(translate),
+            );
+            return checkStatus(payload) === "empty" ? [] : entriesOf(payload);
+          } catch (error) {
+            if (error instanceof AppleError && error.code === "unpaired") throw error;
+            log(`Search candidate of length ${candidate.length} failed: ${error instanceof Error ? error.message : String(error)}`);
+            return [];
+          }
+        };
+        const seen = new Set<string>();
+        const results: LoginSummary[] = [];
+        for (const candidate of searchCandidates(query)) {
+          const found = summarize(await ghostSearch(candidate), seen);
+          log(`Search candidate of length ${candidate.length} returned ${found.length} entries`);
+          results.push(...found);
+        }
+        const term = query.trim().toLowerCase();
+        if (term !== "" && !/[\s/:?#@]/.test(term)) {
+          const all = await ghostSearch("");
+          const matching = all.filter(
+            (entry) =>
+              (typeof entry.USR === "string" && entry.USR.toLowerCase().includes(term)) ||
+              sitesOf(entry).some((site) => site.toLowerCase().includes(term)),
+          );
+          log(`Search of the whole store returned ${all.length} entries, ${matching.length} matching`);
+          results.push(...summarize(matching, seen));
+        }
+        return results;
       }),
   };
 }

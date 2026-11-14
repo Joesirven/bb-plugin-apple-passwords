@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, beforeEach, describe, it } from "node:test";
@@ -32,7 +35,19 @@ const fakeApple: ApplePasswords = {
   },
   password: async (host, username) =>
     host === "example.com" && username === "ana@example.com" ? { username, password: "fake-secret-value" } : null,
+  search: async (query) =>
+    query === "exam"
+      ? [
+          { username: "ana@example.com", sites: ["example.com"] },
+          { username: "orphan", sites: [] },
+        ]
+      : [],
 };
+
+const iconDirectory = mkdtempSync(join(tmpdir(), "apw-icons-"));
+mkdirSync(join(iconDirectory, "images"));
+writeFileSync(join(iconDirectory, "images", "PasswordsToolbar_icon32.png"), "fake-png");
+writeFileSync(join(iconDirectory, "secret.txt"), "do-not-serve");
 
 const tokens: TokenStore = {
   hashes: () => hashes,
@@ -98,11 +113,15 @@ describe("companion HTTP API", () => {
       },
       tokens,
       log: () => undefined,
+      iconDirectory,
     });
     await new Promise<void>((resolve) => server?.listen(port, "127.0.0.1", resolve));
   });
 
-  after(() => server?.close());
+  after(() => {
+    server?.close();
+    rmSync(iconDirectory, { recursive: true, force: true });
+  });
 
   beforeEach(() => {
     userAnswer = "approved";
@@ -133,7 +152,7 @@ describe("companion HTTP API", () => {
   it("reports status without a token", async () => {
     const response = await call("/v1/status");
     assert.equal(response.status, 200);
-    assert.deepEqual(response.json, { version: "0.1.0", connected: false, pairing: "paired", detail: null });
+    assert.deepEqual(response.json, { version: "0.2.0", connected: false, pairing: "paired", detail: null });
   });
 
   it("issues a token only after Touch ID and stores only its hash", async () => {
@@ -154,7 +173,7 @@ describe("companion HTTP API", () => {
   });
 
   it("requires a token for every Apple route", async () => {
-    for (const path of ["/v1/logins", "/v1/password", "/v1/apple/challenge", "/v1/apple/verify"]) {
+    for (const path of ["/v1/logins", "/v1/search", "/v1/password", "/v1/apple/challenge", "/v1/apple/verify"]) {
       const response = await call(path, { body: { url: "example.com", username: "ana@example.com", pin: "123456" } });
       assert.equal(response.status, 401, path);
     }
@@ -230,5 +249,67 @@ describe("companion HTTP API", () => {
     await call("/v1/disconnect", { body: {}, token });
     const response = await call("/v1/logins", { body: { url: "example.com" }, token });
     assert.equal(response.status, 401);
+  });
+
+  it("searches user names and sites without passwords", async () => {
+    const token = await connect();
+    const response = await call("/v1/search", { body: { query: "exam" }, token });
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.json, {
+      results: [
+        { username: "ana@example.com", site: "example.com" },
+        { username: "orphan", site: null },
+      ],
+    });
+    assert.ok(!JSON.stringify(response.json).includes("fake-"));
+    assert.equal(userPrompts.length, 1);
+  });
+
+  it("names both sites in the Touch ID reason when the saved site is not the page", async () => {
+    const token = await connect();
+    userPrompts = [];
+    const response = await call("/v1/password", {
+      body: { url: "https://login.other.example", site: "example.com", username: "ana@example.com" },
+      token,
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.json.hostname, "example.com");
+    assert.match(userPrompts[0] ?? "", /saved for example\.com, on login\.other\.example/);
+  });
+
+  it("asks Touch ID to copy a password when no page is given", async () => {
+    const token = await connect();
+    userPrompts = [];
+    const response = await call("/v1/password", { body: { site: "example.com", username: "ana@example.com" }, token });
+    assert.equal(response.status, 200);
+    assert.match(userPrompts[0] ?? "", /^copy the password for ana@example\.com on example\.com$/);
+  });
+
+  it("serves only Apple's named toolbar icons", async () => {
+    const { request } = await import("node:http");
+    const fetchRaw = (path: string) =>
+      new Promise<{ status: number; type: string | undefined; body: string }>((resolve, reject) => {
+        const req = request(
+          { host: "127.0.0.1", port, path, headers: { Host: `127.0.0.1:${port}`, Origin: ORIGIN } },
+          (res) => {
+            let body = "";
+            res.setEncoding("utf8");
+            res.on("data", (chunk: string) => (body += chunk));
+            res.on("end", () => resolve({ status: res.statusCode ?? 0, type: res.headers["content-type"], body }));
+          },
+        );
+        req.on("error", reject);
+        req.end();
+      });
+    const icon = await fetchRaw("/v1/icon/PasswordsToolbar_icon32.png");
+    assert.equal(icon.status, 200);
+    assert.equal(icon.type, "image/png");
+    for (const path of ["/v1/icon/secret.txt", "/v1/icon/..%2Fsecret.txt", "/v1/icon/../secret.txt", "/v1/icon/PasswordsToolbarUnpaired_icon32.png"]) {
+      const refused = await fetchRaw(path);
+      assert.equal(refused.status, 404, path);
+      assert.ok(!refused.body.includes("do-not-serve"), path);
+    }
+    const foreign = await call("/v1/icon/PasswordsToolbar_icon32.png", { origin: "https://attacker.example" });
+    assert.equal(foreign.status, 403);
   });
 });

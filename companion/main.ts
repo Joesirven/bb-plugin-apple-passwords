@@ -94,7 +94,9 @@ function createAppleSupervisor(config: CompanionConfig): {
         });
       }
       const current = await session;
-      if (!apple) apple = createApplePasswords((expression, timeoutMs) => current.evaluateInExtension(expression, timeoutMs));
+      if (!apple) {
+        apple = createApplePasswords((expression, timeoutMs) => current.evaluateInExtension(expression, timeoutMs), log);
+      }
       return apple;
     },
     async stop() {
@@ -118,6 +120,7 @@ export async function runCompanion(): Promise<void> {
     userCheck: createTouchIdCheck(touchIdBinary, config.biometricsOnly),
     tokens,
     log,
+    iconDirectory: join(SUPPORT_DIR, "extension"),
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);

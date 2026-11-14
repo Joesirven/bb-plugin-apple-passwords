@@ -11,7 +11,8 @@ this plugin, and must not try.
 
 ## Parts
 
-- The plugin adds a key button to the bb browser toolbar and an
+- The plugin offers logins when a login field gets focus in the bb browser,
+  adds a keys button to the bb browser toolbar, and adds an
   **Apple Passwords** setup page in the sidebar.
 - The companion runs on the Mac at `http://127.0.0.1:47823`.
 

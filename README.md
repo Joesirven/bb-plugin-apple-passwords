@@ -7,7 +7,7 @@ Touch ID confirms every password.
 
 | Part | Where it runs | What it does |
 | --- | --- | --- |
-| Plugin (`app.tsx`, `lib/`) | bb desktop app | Key button in the bb browser toolbar, login picker in the page, setup page |
+| Plugin (`app.tsx`, `lib/`) | bb desktop app | Keys button in the bb browser toolbar, login picker under login fields, password search, setup page |
 | Companion (`companion/`) | Your Mac, as a LaunchAgent | Local HTTP API on `127.0.0.1:47823`, Touch ID checks, bridge to Apple Passwords |
 | Apple's iCloud Passwords extension | Headless Chrome, started by the companion | Talks to `PasswordManagerBrowserExtensionHelper`, the Apple helper in macOS |
 
@@ -41,9 +41,19 @@ part of this repository.
 
 ## Use
 
-1. Open a login page in the bb browser.
-2. Click the key button beside the address bar.
-3. Pick a login and confirm with Touch ID.
+1. Open a login page in the bb browser and click the user name or password
+   field. Your saved logins for the site appear below the field. The keys
+   button beside the address bar opens the same list.
+2. Pick a login and confirm with Touch ID.
+3. To use a login that is saved for another site, type in **Search all
+   passwords** in the list. The picker asks you to confirm before it fills a
+   login on a site that is not the saved site.
+4. If bb is not connected or Apple Passwords needs to pair again, the list
+   shows a button. Click it. Touch ID connects bb. For pairing, macOS shows a
+   six-digit code, and bb opens the **Apple Passwords** panel where you type
+   it. The code never goes into the web page.
+5. To copy a password, use **Search your passwords** on the **Apple
+   Passwords** panel and click **Copy password**. Touch ID confirms it.
 
 ## Companion commands
 
@@ -64,16 +74,26 @@ fallback). The log is `~/Library/Logs/bb-apple-passwords.log`.
   and any `Origin` that is not on the allowlist.
 - `POST /v1/connect` issues a token only after Touch ID. The companion stores
   only the SHA-256 hash of the token.
-- `POST /v1/logins` returns user names only.
+- `POST /v1/logins` and `POST /v1/search` return user names and sites only.
+- `GET /v1/icon/<name>` serves only the four Apple toolbar images from the
+  local extension copy. The repository does not contain Apple's images.
 - `POST /v1/password` asks for Touch ID each time. The response is not cached.
 - The picker is in a closed shadow root. It accepts only trusted user clicks
   and keys. Before it fills, it checks that the page is still on the same site.
+- The picker opens by itself only on a trusted focus or click in a login
+  field. It never fills without a pick. After you close it, it stays closed
+  until you click a login field again or the page changes.
+- A login that is saved for another site needs a second confirmation, and
+  the Touch ID text names both sites.
 - The companion never writes a password to disk or to the log.
 
 ## Limits
 
 - The picker fills the top document only. It does not fill logins inside
   frames.
+- Search uses Apple's own site search. A search for a word also tries the
+  word plus `.com`, and the whole store if Apple's helper allows it. The
+  companion log shows how many entries each search step returned.
 - The token is in the bb app local storage. Other bb plugins in the same app
   can read it. Touch ID for each password limits what a stolen token can do.
 - Apple's extension keeps the pairing key in memory only. If the companion,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AppleError, createApplePasswords, normalizeHostname } from "./apple.ts";
+import { AppleError, createApplePasswords, normalizeHostname, searchCandidates } from "./apple.ts";
 
 function fakeExtension(reply: (method: string, args: unknown[]) => unknown) {
   const calls: { method: string; args: unknown[] }[] = [];
@@ -110,5 +110,53 @@ describe("Apple Passwords client", () => {
     assert.equal(normalizeHostname("example.com"), "example.com");
     assert.throws(() => normalizeHostname("chrome-extension://abc/page.html"));
     assert.throws(() => normalizeHostname("file:///etc/hosts"));
+  });
+
+  it("builds search candidates from a word, a host name or an address", () => {
+    assert.deepEqual(searchCandidates("GitHub"), ["github", "github.com"]);
+    assert.deepEqual(searchCandidates("mail.example.org"), ["mail.example.org"]);
+    assert.deepEqual(searchCandidates("https://Accounts.Example.com/x"), ["accounts.example.com"]);
+    assert.deepEqual(searchCandidates(""), [""]);
+  });
+
+  it("searches by site and the whole store, filters locally and drops passwords", async () => {
+    const { apple, calls } = fakeExtension((_method, args) => {
+      const url = args[2];
+      if (url === "github.com") return { STATUS: 0, Entries: [{ USR: "ana", PWD: "fake-1", sites: ["github.com"] }] };
+      if (url === "") {
+        return {
+          STATUS: 0,
+          Entries: [
+            { USR: "ana", PWD: "fake-1", sites: ["github.com"] },
+            { USR: "bo", PWD: "fake-2", sites: ["gist.github.com"] },
+            { USR: "cy", PWD: "fake-3", sites: ["bank.example"] },
+          ],
+        };
+      }
+      return { STATUS: 3 };
+    });
+    const results = await apple.search("github");
+    assert.deepEqual(
+      calls.map((call) => call.args[3]),
+      [
+        { ACT: 5, URL: "github" },
+        { ACT: 5, URL: "github.com" },
+        { ACT: 5, URL: "" },
+      ],
+    );
+    assert.deepEqual(results, [
+      { username: "ana", sites: ["github.com"] },
+      { username: "bo", sites: ["gist.github.com"] },
+    ]);
+    assert.ok(!JSON.stringify(results).includes("fake-"));
+  });
+
+  it("keeps search results when Apple rejects one candidate, but not when the session ended", async () => {
+    const tolerant = fakeExtension((_method, args) =>
+      args[2] === "" ? { STATUS: 1 } : { STATUS: 0, Entries: [{ USR: "ana", sites: ["github.com"] }] },
+    );
+    assert.equal((await tolerant.apple.search("github")).length, 1);
+    const ended = fakeExtension(() => ({ STATUS: 9 }));
+    await assert.rejects(ended.apple.search("github"), (error: unknown) => error instanceof AppleError && error.code === "unpaired");
   });
 });
