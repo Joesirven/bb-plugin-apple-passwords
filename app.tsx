@@ -312,7 +312,7 @@ function AppleKeysIcon({ paired, busy }: { paired: boolean; busy: boolean }) {
   }, [paired]);
   if (busy) return <Icon name="LoaderCircle" aria-hidden className="animate-spin" />;
   if (src === null) return <Icon name="KeyRound" aria-hidden />;
-  return <img src={src} alt="" aria-hidden className="size-4" draggable={false} />;
+  return <img src={src} alt="" aria-hidden className="size-4" draggable={false} onError={() => setSrc(null)} />;
 }
 
 function PasswordsToolbarAction({ url, experimental_page: page }: ExperimentalPluginBrowserToolbarActionProps) {
