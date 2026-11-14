@@ -50,8 +50,9 @@ part of this repository.
    login on a site that is not the saved site.
 4. If bb is not connected or Apple Passwords needs to pair again, the list
    shows a button. Click it. Touch ID connects bb. For pairing, macOS shows a
-   six-digit code, and bb opens the **Apple Passwords** panel where you type
-   it. The code never goes into the web page.
+   six-digit code, and a small code box opens beside the keys icon in the
+   browser toolbar. Type the code there. bb stays on the browser. The code box
+   belongs to bb, not to the web page, so the page cannot read the code.
 5. To copy a password, use **Search your passwords** on the **Apple
    Passwords** panel and click **Copy password**. Touch ID confirms it.
 
@@ -89,6 +90,8 @@ fallback). The log is `~/Library/Logs/bb-apple-passwords.log`.
 
 ## Limits
 
+- Apple's extension keeps the pairing in memory. The pairing lasts while the
+  companion runs. If the companion or its Chrome restarts, pair again.
 - The picker fills the top document only. It does not fill logins inside
   frames.
 - Search is by site, because Apple's helper looks up one site at a time. A

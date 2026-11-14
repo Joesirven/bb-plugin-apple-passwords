@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import {
   definePluginApp,
-  useBbNavigate,
   type ExperimentalPluginBrowserPage,
   type ExperimentalPluginBrowserToolbarActionProps,
 } from "@get-bb/plugin-sdk/app";
@@ -83,14 +82,22 @@ function appleIconUrl(paired: boolean, dark: boolean): Promise<string> {
   return cached;
 }
 
+const CODE_PROMPT = "Type the six-digit code that macOS shows in the box beside the keys icon, above this page.";
+const OFFLINE_PROMPT = "The Apple Passwords companion is not running on this Mac. Open Apple Passwords in the bb sidebar to install it.";
+
 function useFillFlow(page: ExperimentalPluginBrowserPage | null, url: string) {
-  const navigate = useBbNavigate();
   const armNonce = useRef(newNonce());
   const session = useRef<PickerSession | null>(null);
   const opening = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [paired, setPaired] = useState(false);
+  const [awaitingCode, setAwaitingCodeState] = useState(false);
+  const codeRequested = useRef(false);
+  const setAwaitingCode = useCallback((value: boolean) => {
+    codeRequested.current = value;
+    setAwaitingCodeState(value);
+  }, []);
 
   const refreshPairing = useCallback(() => {
     if (!companion.hasToken()) {
@@ -123,17 +130,11 @@ function useFillFlow(page: ExperimentalPluginBrowserPage | null, url: string) {
       const state = await companion.challenge();
       if (state === "paired") return true;
       if (state !== "awaiting-code") throw new Error("Apple Passwords did not start pairing. Check that iCloud Keychain is on.");
-      await showPicker(info, {
-        logins: [],
-        message: "macOS shows a six-digit code. Type it in the Apple Passwords panel in bb.",
-        action: null,
-        searchable: false,
-        focus: false,
-      });
-      navigate.toPluginPanel(PANEL_PATH);
+      setAwaitingCode(true);
+      await showPicker(info, { logins: [], message: CODE_PROMPT, action: null, searchable: false, focus: false });
       return false;
     },
-    [navigate, showPicker],
+    [setAwaitingCode, showPicker],
   );
 
   const open = useCallback(
@@ -167,10 +168,17 @@ function useFillFlow(page: ExperimentalPluginBrowserPage | null, url: string) {
         } catch (cause) {
           if (!(cause instanceof CompanionError)) throw cause;
           if (cause.code === "offline") {
-            if (mode === "explicit") navigate.toPluginPanel(PANEL_PATH);
+            if (mode === "explicit") {
+              setError("The Apple Passwords companion is not running");
+              await showPicker(info, { logins: [], message: OFFLINE_PROMPT, action: null, searchable: false, focus: false });
+            }
             return;
           }
           if (NEEDS_CONNECT.has(cause.code) || cause.code === "unpaired") {
+            if (mode === "field" && cause.code === "unpaired" && codeRequested.current) {
+              await showPicker(info, { logins: [], message: CODE_PROMPT, action: null, searchable: false, focus: false });
+              return;
+            }
             if (mode === "field") {
               await showPicker(info, {
                 logins: [],
@@ -207,7 +215,7 @@ function useFillFlow(page: ExperimentalPluginBrowserPage | null, url: string) {
         refreshPairing();
       }
     },
-    [navigate, page, refreshPairing, showPicker, startPairing],
+    [page, refreshPairing, showPicker, startPairing],
   );
 
   useEffect(() => {
@@ -295,7 +303,29 @@ function useFillFlow(page: ExperimentalPluginBrowserPage | null, url: string) {
     [page],
   );
 
-  return { open, busy, error, paired };
+  const submitCode = useCallback(
+    async (code: string): Promise<string | null> => {
+      try {
+        const state = await companion.verify(code);
+        if (state !== "paired") return "Apple Passwords did not accept the code. Click the keys icon to start again.";
+        setAwaitingCode(false);
+        setPaired(true);
+        void open("explicit");
+        return null;
+      } catch (cause) {
+        return errorText(cause);
+      }
+    },
+    [open, setAwaitingCode],
+  );
+
+  const cancelCode = useCallback(() => {
+    setAwaitingCode(false);
+    if (session.current) page?.evaluate(buildCloseExpression()).catch(() => undefined);
+    session.current = null;
+  }, [page, setAwaitingCode]);
+
+  return { open, busy, error, paired, awaitingCode, submitCode, cancelCode };
 }
 
 function AppleKeysIcon({ paired, busy }: { paired: boolean; busy: boolean }) {
@@ -315,12 +345,68 @@ function AppleKeysIcon({ paired, busy }: { paired: boolean; busy: boolean }) {
   return <img src={src} alt="" aria-hidden className="size-4" draggable={false} onError={() => setSrc(null)} />;
 }
 
+function PairingCodeField({ submit, cancel }: { submit: (code: string) => Promise<string | null>; cancel: () => void }) {
+  const [code, setCode] = useState("");
+  const [problem, setProblem] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const send = async (value: string) => {
+    if (checking || !/^\d{6}$/.test(value)) return;
+    setChecking(true);
+    setProblem(await submit(value));
+    setChecking(false);
+    setCode("");
+  };
+  return (
+    <form
+      className="flex shrink-0 items-center gap-1"
+      onSubmit={(event: FormEvent) => {
+        event.preventDefault();
+        void send(code);
+      }}
+    >
+      <input
+        autoFocus
+        aria-label="Six-digit code from macOS for Apple Passwords"
+        title={problem ?? "Type the six-digit code that macOS shows"}
+        value={code}
+        disabled={checking}
+        inputMode="numeric"
+        autoComplete="one-time-code"
+        maxLength={6}
+        placeholder={problem ? "Try again" : "Mac code"}
+        onChange={(event) => {
+          const next = event.target.value.replace(/\D/g, "").slice(0, 6);
+          setCode(next);
+          setProblem(null);
+          if (next.length === 6) void send(next);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") cancel();
+        }}
+        className={cn(
+          "h-6 w-20 rounded-md border bg-background px-1.5 text-center font-mono text-xs tracking-widest text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          problem !== null ? "border-destructive" : "border-border",
+        )}
+      />
+      <button
+        type="button"
+        aria-label="Cancel pairing"
+        title="Cancel pairing"
+        onClick={cancel}
+        className="flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-state-hover hover:text-foreground"
+      >
+        <Icon name="X" aria-hidden className="size-3.5" />
+      </button>
+    </form>
+  );
+}
+
 function PasswordsToolbarAction({ url, experimental_page: page }: ExperimentalPluginBrowserToolbarActionProps) {
-  const { open, busy, error, paired } = useFillFlow(page, url);
+  const { open, busy, error, paired, awaitingCode, submitCode, cancelCode } = useFillFlow(page, url);
   const disabled = page === null || !isWebUrl(url);
   const label =
     page === null ? "Apple Passwords works in the bb desktop app" : (error ?? "Fill a password from Apple Passwords");
-  return (
+  const button = (
     <button
       type="button"
       aria-label={label}
@@ -335,6 +421,13 @@ function PasswordsToolbarAction({ url, experimental_page: page }: ExperimentalPl
       <AppleKeysIcon paired={paired} busy={busy} />
       {error !== null ? <span className="absolute right-1 top-1 size-1.5 rounded-full bg-destructive" aria-hidden /> : null}
     </button>
+  );
+  if (!awaitingCode) return button;
+  return (
+    <div className="flex shrink-0 items-center gap-1">
+      {button}
+      <PairingCodeField submit={submitCode} cancel={cancelCode} />
+    </div>
   );
 }
 
