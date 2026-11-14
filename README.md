@@ -45,8 +45,8 @@ part of this repository.
    field. Your saved logins for the site appear below the field. The keys
    button beside the address bar opens the same list.
 2. Pick a login and confirm with Touch ID.
-3. To use a login that is saved for another site, type in **Search all
-   passwords** in the list. The picker asks you to confirm before it fills a
+3. To use a login that is saved for another site, type its site in **Search
+   by site** in the list, for example `github` or `mail.example.org`. The picker asks you to confirm before it fills a
    login on a site that is not the saved site.
 4. If bb is not connected or Apple Passwords needs to pair again, the list
    shows a button. Click it. Touch ID connects bb. For pairing, macOS shows a
@@ -91,9 +91,10 @@ fallback). The log is `~/Library/Logs/bb-apple-passwords.log`.
 
 - The picker fills the top document only. It does not fill logins inside
   frames.
-- Search uses Apple's own site search. A search for a word also tries the
-  word plus `.com`, and the whole store if Apple's helper allows it. The
-  companion log shows how many entries each search step returned.
+- Search is by site, because Apple's helper looks up one site at a time. A
+  word without a dot searches the word plus `.com`, for example `github`
+  searches `github.com`. Apple's helper has no search of the whole store. An
+  empty search makes the helper exit, so the companion never sends one.
 - The token is in the bb app local storage. Other bb plugins in the same app
   can read it. Touch ID for each password limits what a stolen token can do.
 - Apple's extension keeps the pairing key in memory only. If the companion,

@@ -91,18 +91,21 @@ function translate(error: unknown): never {
   throw new AppleError("apple-error", message);
 }
 
+const HOSTNAME_PATTERN = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/;
+
 export function searchCandidates(query: string): string[] {
   const term = query.trim().toLowerCase();
-  if (term.length > 253) throw new AppleError("apple-error", "The search is too long");
-  if (/[\s/:?#@]/.test(term)) {
+  if (term === "" || term.length > 253) return [];
+  let host = term;
+  if (/[/:?#@]/.test(term)) {
     try {
-      return [normalizeHostname(term)];
+      host = normalizeHostname(term);
     } catch {
       return [];
     }
   }
-  if (term === "") return [""];
-  return term.includes(".") ? [term] : [term, `${term}.com`];
+  if (!host.includes(".")) host = `${host}.com`;
+  return HOSTNAME_PATTERN.test(host) ? [host] : [];
 }
 
 function summarize(entries: Record<string, unknown>[], seen: Set<string>): LoginSummary[] {
@@ -191,17 +194,6 @@ export function createApplePasswords(
           const found = summarize(await ghostSearch(candidate), seen);
           log(`Search candidate of length ${candidate.length} returned ${found.length} entries`);
           results.push(...found);
-        }
-        const term = query.trim().toLowerCase();
-        if (term !== "" && !/[\s/:?#@]/.test(term)) {
-          const all = await ghostSearch("");
-          const matching = all.filter(
-            (entry) =>
-              (typeof entry.USR === "string" && entry.USR.toLowerCase().includes(term)) ||
-              sitesOf(entry).some((site) => site.toLowerCase().includes(term)),
-          );
-          log(`Search of the whole store returned ${all.length} entries, ${matching.length} matching`);
-          results.push(...summarize(matching, seen));
         }
         return results;
       }),

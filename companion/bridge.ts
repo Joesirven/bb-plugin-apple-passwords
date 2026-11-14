@@ -38,13 +38,20 @@ export const BRIDGE_SOURCE = String.raw`(() => {
       };
       tick();
     });
+  const recover = async () => {
+    if (g_theState === ContextState.NativeSupportNotInstalled) {
+      g_nativeAppPort = null;
+      connectToBackgroundNativeAppAndSetUpListeners();
+    }
+    ensurePort();
+  };
   self.${BRIDGE_GLOBAL} = {
     async state() {
-      ensurePort();
+      await recover();
       return waitForState((state) => state !== ContextState.CheckEngine, 5000);
     },
     async challenge() {
-      ensurePort();
+      await recover();
       await waitForState((state) => state !== ContextState.CheckEngine, 5000);
       if (g_theState === ContextState.SessionKeySet) return g_theState;
       if (g_theState !== ContextState.NotInSession) resetTheSession(ContextState.NotInSession);

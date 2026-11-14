@@ -235,7 +235,7 @@ function useFillFlow(page: ExperimentalPluginBrowserPage | null, url: string) {
         const reply = (logins: PickerLogin[], text: string | null) =>
           page.evaluate(buildResultsExpression(current.nonce, logins, text)).catch(() => undefined);
         if (message.query === "") {
-          void reply(current.logins, current.logins.length === 0 ? "Type a site or a user name." : null);
+          void reply(current.logins, current.logins.length === 0 ? "Type a site, for example github.com." : null);
           return;
         }
         companion.search(message.query).then(
@@ -385,11 +385,11 @@ function PasswordSearch() {
   };
 
   return (
-    <Step done={false} title="Search your passwords">
+    <Step done={false} title="Search your passwords by site">
       <Input
         value={query}
         onChange={(event) => setQuery(event.target.value.slice(0, 253))}
-        placeholder="A site or a user name"
+        placeholder="A site, for example github.com"
         aria-label="Search passwords"
       />
       {note ? <p className="text-sm text-muted-foreground">{note}</p> : null}

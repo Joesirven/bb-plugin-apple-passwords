@@ -175,8 +175,8 @@ ${PAGE_HELPERS}
     const search = document.createElement("input");
     search.className = "search";
     search.type = "search";
-    search.placeholder = "Search all passwords";
-    search.setAttribute("aria-label", "Search all passwords");
+    search.placeholder = "Search by site";
+    search.setAttribute("aria-label", "Search by site");
     search.addEventListener("input", (event) => {
       if (!event.isTrusted) return;
       clearTimeout(searchTimer);
