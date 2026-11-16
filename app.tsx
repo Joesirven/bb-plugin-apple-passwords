@@ -25,7 +25,6 @@ import {
 } from "@/lib/page-script";
 import { cn } from "@/lib/utils";
 
-const PANEL_PATH = "setup";
 const INSTALL_COMMAND =
   "git clone https://github.com/Joesirven/bb-plugin-apple-passwords && node bb-plugin-apple-passwords/companion/cli.ts install";
 
@@ -71,8 +70,10 @@ type OpenMode = "explicit" | "field";
 const NEEDS_CONNECT = new Set(["not-connected"]);
 const ICON_CACHE = new Map<string, Promise<string>>();
 
-function appleIconUrl(paired: boolean, dark: boolean): Promise<string> {
-  const name = `PasswordsToolbar${paired ? "" : "Unpaired"}${dark ? "-darkmode" : ""}_icon32.png`;
+const APPLE_ICON_NAME = "PasswordsExtensionIcon_32.png";
+
+function appleIconUrl(): Promise<string> {
+  const name = APPLE_ICON_NAME;
   let cached = ICON_CACHE.get(name);
   if (!cached) {
     cached = companion.icon(name).then((blob) => URL.createObjectURL(blob));
@@ -83,7 +84,7 @@ function appleIconUrl(paired: boolean, dark: boolean): Promise<string> {
 }
 
 const CODE_PROMPT = "Type the six-digit code that macOS shows in the box beside the keys icon, above this page.";
-const OFFLINE_PROMPT = "The Apple Passwords companion is not running on this Mac. Open Apple Passwords in the bb sidebar to install it.";
+const OFFLINE_PROMPT = "The Apple Passwords companion is not running on this Mac. Open bb Settings, then Apple Passwords, to install it.";
 
 function useFillFlow(page: ExperimentalPluginBrowserPage | null, url: string) {
   const armNonce = useRef(newNonce());
@@ -332,17 +333,26 @@ function AppleKeysIcon({ paired, busy }: { paired: boolean; busy: boolean }) {
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
-    appleIconUrl(paired, isDarkTheme()).then(
+    appleIconUrl().then(
       (next) => active && setSrc(next),
       () => active && setSrc(null),
     );
     return () => {
       active = false;
     };
-  }, [paired]);
+  }, []);
   if (busy) return <Icon name="LoaderCircle" aria-hidden className="animate-spin" />;
   if (src === null) return <Icon name="KeyRound" aria-hidden />;
-  return <img src={src} alt="" aria-hidden className="size-4" draggable={false} onError={() => setSrc(null)} />;
+  return (
+    <img
+      src={src}
+      alt=""
+      aria-hidden
+      className={paired ? "size-4" : "size-4 opacity-60 grayscale"}
+      draggable={false}
+      onError={() => setSrc(null)}
+    />
+  );
 }
 
 function PairingCodeField({ submit, cancel }: { submit: (code: string) => Promise<string | null>; cancel: () => void }) {
@@ -676,11 +686,10 @@ function SetupPage() {
 }
 
 export default definePluginApp((app) => {
-  app.slots.navPanel({
+  app.slots.settingsSection({
     id: "setup",
     title: "Apple Passwords",
-    icon: "KeyRound",
-    path: PANEL_PATH,
+    description: "Install the companion on this Mac, pair it with Apple Passwords, and search your passwords.",
     component: SetupPage,
   });
   app.slots.experimental_browserToolbarAction({

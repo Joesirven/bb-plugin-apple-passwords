@@ -9,7 +9,7 @@ password before it leaves your Mac.
 - Search your passwords by site from the list or from the setup page.
 - Pick a login, confirm with Touch ID, and bb fills the user name and the
   password into the page.
-- An **Apple Passwords** setup page in the left sidebar. It shows the
+- An **Apple Passwords** setup section in bb Settings. It shows the
   companion state and walks you through pairing.
 
 ## How it works

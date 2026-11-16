@@ -11,6 +11,9 @@ export const ICON_NAMES = new Set([
   "PasswordsToolbar-darkmode_icon32.png",
   "PasswordsToolbarUnpaired_icon32.png",
   "PasswordsToolbarUnpaired-darkmode_icon32.png",
+  "PasswordsExtensionIcon_16.png",
+  "PasswordsExtensionIcon_32.png",
+  "PasswordsExtensionIcon_128.png",
 ]);
 const MAX_BODY_BYTES = 16 * 1024;
 

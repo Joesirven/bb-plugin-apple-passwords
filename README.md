@@ -34,7 +34,7 @@ part of this repository.
    server addresses from the bb desktop app settings. To allow another bb
    address, add `--origin https://your-bb-server`.
 3. Install the plugin in bb: `bb plugin install git:<repository URL>@main`.
-4. In bb, open **Apple Passwords** in the sidebar:
+4. In bb, open **Settings**, then **Apple Passwords**:
    1. Click **Connect** and confirm with Touch ID.
    2. Click **Start pairing**. macOS shows a six-digit code.
    3. Type the code and click **Pair**.

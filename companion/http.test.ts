@@ -47,6 +47,7 @@ const fakeApple: ApplePasswords = {
 const iconDirectory = mkdtempSync(join(tmpdir(), "apw-icons-"));
 mkdirSync(join(iconDirectory, "images"));
 writeFileSync(join(iconDirectory, "images", "PasswordsToolbar_icon32.png"), "fake-png");
+writeFileSync(join(iconDirectory, "images", "PasswordsExtensionIcon_32.png"), "fake-color-png");
 writeFileSync(join(iconDirectory, "secret.txt"), "do-not-serve");
 
 const tokens: TokenStore = {
@@ -304,6 +305,9 @@ describe("companion HTTP API", () => {
     const icon = await fetchRaw("/v1/icon/PasswordsToolbar_icon32.png");
     assert.equal(icon.status, 200);
     assert.equal(icon.type, "image/png");
+    const colorIcon = await fetchRaw("/v1/icon/PasswordsExtensionIcon_32.png");
+    assert.equal(colorIcon.status, 200);
+    assert.equal(colorIcon.body, "fake-color-png");
     for (const path of ["/v1/icon/secret.txt", "/v1/icon/..%2Fsecret.txt", "/v1/icon/../secret.txt", "/v1/icon/PasswordsToolbarUnpaired_icon32.png"]) {
       const refused = await fetchRaw(path);
       assert.equal(refused.status, 404, path);
